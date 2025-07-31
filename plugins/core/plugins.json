@@ -1,0 +1,9 @@
+[
+    {
+        "ID": "1",
+        "Name": "powertable",
+        "Description": "A plugin for creating powerful tables",
+        "Version": "0.1.0",
+        "Author": "Benana Team"
+    }
+]
