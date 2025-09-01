@@ -1,6 +1,0 @@
-database:
-  host: localhost
-  port: 5432
-  user: benana_user
-  password: benana_password
-  name: benana
