@@ -56,6 +56,11 @@ In research and team building phase.
 └── docs/                  # Documentation
 ```
 
+### Backend Docs
+
+- Backend setup (DB, build, run, plugin dev): `docs/backend-setup.md`
+- Detailed plugins architecture: `docs/plugins-architecture.md`
+
 ### Technology Stack
 
 **Frontend:**

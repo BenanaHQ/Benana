@@ -2,266 +2,242 @@
 
 ## Overview
 
-This system implements a dynamic plugin architecture for Go applications. Plugins are compiled at runtime to shared object files and loaded dynamically without requiring server restarts.
+This system implements a dynamic plugin architecture for Python FastAPI applications. Plugins are Python modules that can be loaded dynamically at runtime without requiring server restarts.
 
 ## Architecture Components
 
 ### Core Components
 
-The system consists of a main server that manages three primary subsystems. The HTTP server handles incoming requests using the Fuego framework, while the Plugin Manager orchestrates the entire plugin lifecycle. A PostgreSQL database stores plugin metadata and configuration. Below this sits the Plugin Subsystem, which contains six specialized services: Discovery Service finds new plugins, Compiler builds them into shared objects, Loader handles dynamic loading, Repository manages database operations, Controller provides API endpoints, and Events handles real-time notifications through PostgreSQL's LISTEN/NOTIFY system.
+The system consists of a FastAPI server that manages plugins through a Plugin Manager. The Plugin Manager orchestrates the entire plugin lifecycle including discovery, loading, and route registration. A PostgreSQL database stores plugin metadata and tracks migration states. The system uses SQLAlchemy for database operations and Alembic for core migrations, while plugins provide their own SQL migrations.
 
-Plugin files are organized with source code in parallel directories (like ../powertable/) containing main.go, go.mod, and plugin.yaml files. Compiled shared object files are stored in ./bin/plugins/ for runtime loading.
+Plugin files are organized in the `plugins/` directory with each plugin having its own subdirectory containing `plugin.py`, `routes.py`, and a `migrations/` folder.
 
 ## System Flow
 
 ### Auto-Discovery Process
 
-When the server starts, it scans the ../plugins/ directory for plugin directories. For each directory found, the system validates the plugin structure by checking for main.go or plugin.go files. If the plugin doesn't exist in the database, the system validates the plugin interface, compiles it to a shared object file, and tests loading. Valid plugins are registered in the database, loaded into memory, and have their routes registered with the HTTP server.
+When the server starts, it scans the `plugins/` directory for plugin directories. For each directory found, the system validates the plugin structure by checking for `plugin.py` files. If the plugin doesn't exist in the database, it's automatically enabled. If it exists with 'active' status, it's loaded. Plugins with 'inactive' status are skipped even if present on disk.
 
 ### Plugin Loading Process
 
-The Plugin Manager coordinates with the Compiler to build the plugin using "go build -buildmode=plugin". Once compiled, the Loader opens the shared object file, looks up the "NewPlugin" factory function, creates an instance, and initializes it. The plugin then registers its routes with the server, and the database is updated to reflect the active status.
+The Plugin Manager imports the plugin module and calls the `get_plugin()` function to obtain a plugin instance. It validates the plugin implements the required `BasePlugin` interface, applies any pending migrations, registers the plugin in the database, calls the plugin's `on_load()` method, registers routes with FastAPI, and registers any declared permissions.
 
 ## Plugin Interface
 
 ### Required Interface Implementation
 
-Every plugin must implement the PluginInterface, which requires four methods: Initialize for setup with context, GetMetadata to return plugin information, RegisterRoutes to register HTTP endpoints with the server, and Cleanup for resource cleanup when the plugin is unloaded.
+Every plugin must implement the `BasePlugin` abstract class, which requires:
+
+- `name`: Plugin identifier
+- `version`: Plugin version string
+- `description`: Optional description
+- `is_core`: Boolean indicating if it's a core plugin
+- `migrations_path()`: Static method returning path to migrations directory
+- `on_load(ctx)`: Called after migrations but before route registration
+- `register_routes(app, router)`: Register FastAPI routes
+- `register_permissions()`: Optional method returning list of permissions
+- `seed(db)`: Optional method for database seeding
+- `on_unload(ctx)`: Optional cleanup method
 
 ### Example Plugin Implementation
 
-A typical plugin implementation exports a NewPlugin factory function that returns a struct implementing the PluginInterface. The plugin includes metadata like name, version, description, and author. Route registration typically uses the Fuego framework to define HTTP handlers for GET, POST, and other HTTP methods.
+```python
+from pathlib import Path
+from typing import Any
+from fastapi import FastAPI, APIRouter
+from server.app.core.plugin_spi import BasePlugin, Permission
 
-```go
-package main
+class MyPlugin(BasePlugin):
+    name = "myplugin"
+    version = "1.0.0"
+    description = "My awesome plugin"
+    is_core = False
 
-import (
-    "context"
-    "benana/types"
-    "github.com/go-fuego/fuego"
-)
+    @staticmethod
+    def migrations_path() -> Path:
+        return Path(__file__).parent / "migrations"
 
-type MyPlugin struct {
-    metadata types.PluginMetadata
-}
+    def on_load(self, ctx: dict[str, Any]) -> None:
+        services = ctx.get("services")
+        services.register("myplugin.echo", lambda x: x)
 
-func NewPlugin() types.PluginInterface {
-    return &MyPlugin{
-        metadata: types.PluginMetadata{
-            Name:        "myplugin",
-            Version:     "1.0.0",
-            Description: "My awesome plugin",
-            Author:      "Developer",
-        },
-    }
-}
+    def register_routes(self, app: FastAPI, router: APIRouter) -> None:
+        @router.get("/hello")
+        def hello():
+            return {"message": "Hello from MyPlugin!"}
 
-func (p *MyPlugin) Initialize(ctx context.Context) error {
-    return nil
-}
+        @router.post("/echo")
+        def echo(data: dict):
+            return {"received": data}
 
-func (p *MyPlugin) GetMetadata() types.PluginMetadata {
-    return p.metadata
-}
+    def register_permissions(self):
+        return [
+            Permission(key="myplugin:view", description="View myplugin"),
+            Permission(key="myplugin:edit", description="Edit myplugin"),
+        ]
 
-func (p *MyPlugin) RegisterRoutes(server *fuego.Server) error {
-    fuego.Get(server, "/myplugin", p.handleGet)
-    fuego.Post(server, "/myplugin", p.handlePost)
-    return nil
-}
+    def seed(self, db) -> None:
+        # Optional database seeding
+        pass
 
-func (p *MyPlugin) Cleanup(ctx context.Context) error {
-    return nil
-}
+    def on_unload(self, ctx: dict[str, Any]) -> None:
+        # Optional cleanup
+        pass
 
-func (p *MyPlugin) handleGet(c fuego.ContextNoBody) (interface{}, error) {
-    return map[string]string{"message": "Hello from MyPlugin!"}, nil
-}
-
-func (p *MyPlugin) handlePost(c fuego.ContextWithBody[map[string]interface{}]) (interface{}, error) {
-    body, _ := c.Body()
-    return map[string]interface{}{"received": body}, nil
-}
+def get_plugin() -> BasePlugin:
+    return MyPlugin()
 ```
 
 ## Database Schema
 
-The system uses two main tables. The plugins table stores core plugin information including id, name, description, version, author, type, paths to source and binary files, status, and timestamps. The plugin_endpoints table tracks individual HTTP endpoints registered by each plugin, linking them back to the parent plugin with foreign key constraints.
+The system uses three main tables. The `plugins` table stores core plugin information including id, name, version, description, core status, and timestamps. The `plugin_migrations` table tracks which migrations have been applied for each plugin. The `dummy_core_table` is a placeholder for core functionality.
 
 ```sql
 CREATE TABLE plugins (
-    id VARCHAR(255) PRIMARY KEY,
+    id VARCHAR(36) PRIMARY KEY,
     name VARCHAR(255) NOT NULL UNIQUE,
-    description TEXT,
     version VARCHAR(100) NOT NULL,
-    author VARCHAR(255),
-    type VARCHAR(100) NOT NULL DEFAULT 'static',
-    path VARCHAR(500),
-    binary_path VARCHAR(500),
-    source_path VARCHAR(500),
-    status VARCHAR(50) NOT NULL DEFAULT 'active',
+    description TEXT,
+    is_core BOOLEAN NOT NULL DEFAULT FALSE,
+    status VARCHAR(20) NOT NULL DEFAULT 'active',
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE plugin_endpoints (
-    id BIGSERIAL PRIMARY KEY,
-    plugin_id VARCHAR(255) NOT NULL REFERENCES plugins(id) ON DELETE CASCADE,
-    method VARCHAR(10) NOT NULL,
-    path VARCHAR(500) NOT NULL,
-    handler VARCHAR(255) NOT NULL,
-    type VARCHAR(50) NOT NULL DEFAULT 'REST',
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE plugin_migrations (
+    id SERIAL PRIMARY KEY,
+    plugin VARCHAR(255) NOT NULL,
+    migration_id VARCHAR(255) NOT NULL,
+    checksum VARCHAR(128) NOT NULL,
+    applied_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(plugin, migration_id)
 );
 ```
 
 ## API Endpoints
 
-The system provides a RESTful API for plugin management. GET /plugins lists all registered plugins, while GET /plugins/{name} returns details for a specific plugin. POST /plugins/{name}/reload forces recompilation and reloading of a plugin. POST /plugins/{name}/toggle enables or disables a plugin.
+The system provides RESTful API endpoints for plugin management under `/admin/`:
 
-API responses include comprehensive plugin information such as unique identifiers, metadata, file paths, and current status. The reload endpoint provides feedback on the reload process, while the toggle endpoint confirms status changes.
+- `GET /admin/plugins` - List available and loaded plugins
+- `POST /admin/plugins/{name}/enable` - Enable a plugin
+- `POST /admin/plugins/{name}/disable` - Disable a plugin  
+- `POST /admin/plugins/{name}/reload` - Reload a plugin
+- `POST /admin/plugins/install` - Install a plugin from ZIP upload
 
 ### API Examples
 
 #### List All Plugins
 ```bash
-curl http://localhost:9999/plugins
+curl http://localhost:8000/admin/plugins
 ```
 
 ```json
-[
-  {
-    "id": "uuid-here",
-    "name": "powertable",
-    "description": "A plugin for creating powerful tables",
-    "version": "0.1.0",
-    "author": "Benana Team",
-    "type": "dynamic",
-    "status": "active",
-    "source_path": "../powertable",
-    "binary_path": "/abs/path/bin/plugins/powertable.so"
-  }
-]
+{
+  "available": ["powertable", "reports"],
+  "loaded": ["powertable"]
+}
 ```
 
-#### Get Plugin by Name
+#### Enable Plugin
 ```bash
-curl http://localhost:9999/plugins/powertable
+curl -X POST http://localhost:8000/admin/plugins/reports/enable
+```
+
+```json
+{
+  "status": "enabled",
+  "name": "reports"
+}
 ```
 
 #### Reload Plugin
 ```bash
-curl -X POST http://localhost:9999/plugins/powertable/reload
+curl -X POST http://localhost:8000/admin/plugins/powertable/reload
 ```
 
 ```json
 {
-  "message": "Plugin reload triggered successfully",
-  "plugin": "powertable",
-  "status": "reloading"
+  "status": "reloaded", 
+  "name": "powertable"
 }
-```
-
-#### Toggle Plugin Status
-```bash
-curl -X POST http://localhost:9999/plugins/powertable/toggle
-```
-
-```json
-{
-  "message": "Plugin status updated successfully",
-  "plugin": "powertable",
-  "status": "inactive"
-}
-```
-
-## Event-Driven Updates
-
-The system uses PostgreSQL triggers to automatically notify the application when plugins are modified. A trigger function builds a JSON payload containing the operation type, table name, plugin information, and timestamp, then sends it via pg_notify. The Go application listens for these notifications and responds by loading, reloading, or unloading plugins as appropriate, then updating the HTTP routes accordingly.
-
-### PostgreSQL Triggers
-
-```sql
-CREATE OR REPLACE FUNCTION notify_plugin_change()
-RETURNS TRIGGER AS $$
-DECLARE payload JSON;
-BEGIN
-    -- Build notification payload
-    payload = json_build_object(
-        'operation', TG_OP,
-        'table', TG_TABLE_NAME,
-        'id', NEW.id,
-        'name', NEW.name,
-        'new_data', row_to_json(NEW),
-        'timestamp', extract(epoch from now())
-    );
-    
-    -- Send notification
-    PERFORM pg_notify('plugin_changes', payload::text);
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
 ```
 
 ## Plugin Development Guide
 
-Creating a new plugin involves several steps. First, create a new directory for the plugin and initialize a Go module. Add dependencies, particularly the shared types module and Fuego framework. Implement the required PluginInterface in main.go, including the NewPlugin factory function. Test the plugin by starting the server, which will automatically discover, compile, and load the new plugin. Verify the plugin registration and test its endpoints using standard HTTP requests.
+Creating a new plugin involves several steps:
 
 ### Step-by-Step Process
 
 #### 1. Create Plugin Directory
 ```bash
-mkdir ../plugins/myplugin
-cd ../plugins/myplugin
+mkdir plugins/myplugin
+cd plugins/myplugin
 ```
 
-#### 2. Initialize Go Module
-```bash
-go mod init myplugin
+#### 2. Create Plugin Files
+Create `plugin.py` with the required interface implementation (see example above).
+
+#### 3. Create Routes
+Create `routes.py` for route definitions:
+
+```python
+from fastapi import APIRouter
+
+def get_router() -> APIRouter:
+    r = APIRouter()
+
+    @r.get("/hello")
+    def hello():
+        return {"plugin": "myplugin", "message": "Hello!"}
+
+    return r
 ```
 
-#### 3. Add Dependencies
-```go
-// go.mod
-module myplugin
+#### 4. Add Migrations (Optional)
+Create `migrations/` directory and add SQL migration files:
 
-go 1.24.2
-
-replace benana/types => ../types
-
-require (
-    benana/types v0.0.0-00010101000000-000000000000
-    github.com/go-fuego/fuego v0.18.8
-)
+```sql
+-- migrations/0001_init.sql
+CREATE TABLE IF NOT EXISTS myplugin_items (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 ```
-
-#### 4. Implement Plugin
-Create `main.go` with the required interface implementation (see example above).
 
 #### 5. Test Plugin
-Start the server - your plugin will be auto-discovered, compiled, and loaded:
+Start the server - your plugin will be auto-discovered and loaded:
 ```bash
-cd ../core
-go run .
+cd server
+uvicorn app.main:app --reload
 ```
 
 #### 6. Verify Plugin
 ```bash
-curl http://localhost:9999/plugins/myplugin  # Check registration
-curl http://localhost:9999/myplugin          # Test plugin endpoint
+curl http://localhost:8000/admin/plugins  # Check registration
+curl http://localhost:8000/myplugin/hello  # Test plugin endpoint
 ```
 
 ## Key Features
 
-The system provides automatic discovery of plugins in the plugins directory without manual registration. Go source code is compiled to shared object files at runtime using the standard Go build system with plugin mode. Interface validation ensures plugins implement the required interface before registration. Hot reload capability allows plugins to be reloaded without server restart through API calls. Database integration stores plugin metadata in PostgreSQL with real-time updates via LISTEN/NOTIFY. The event-driven architecture uses database triggers to notify the application of changes, enabling automatic plugin lifecycle management. Route management automatically registers and removes plugin routes with the HTTP server.
+- **Auto-Discovery**: Plugins are automatically found in `plugins/` directory
+- **Dynamic Loading**: Python modules loaded at runtime without compilation
+- **Interface Validation**: Plugins must implement `BasePlugin` interface
+- **Hot Reload**: Plugins can be reloaded without server restart
+- **Database Integration**: Plugin metadata stored in PostgreSQL
+- **Migration Support**: Plugins can provide SQL migrations
+- **Permission System**: Built-in permission registration
+- **Service Registry**: Plugins can register and use services
+- **Route Management**: Plugin routes automatically registered with FastAPI
 
 ### Feature Summary
 
-- **Auto-Discovery**: Plugins are automatically found in `../plugins/` directory
-- **Runtime Compilation**: Go source code compiled to `.so` files at runtime
-- **Interface Validation**: Plugins must implement `PluginInterface`
+- **Auto-Discovery**: Plugins automatically found in `plugins/` directory
+- **Dynamic Loading**: Python modules loaded at runtime
+- **Interface Validation**: Plugins must implement `BasePlugin`
 - **Hot Reload**: Plugins can be reloaded without server restart
 - **Database Integration**: Plugin metadata stored in PostgreSQL
-- **Event-Driven Architecture**: Database triggers notify application of changes
-- **Route Management**: Plugin routes automatically registered with HTTP server
+- **Migration Support**: SQL migrations per plugin
+- **Permission System**: Declarative permission registration
+- **Service Registry**: Shared service registration
+- **Route Management**: Automatic FastAPI route registration

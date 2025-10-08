@@ -174,3 +174,34 @@ go.work.sum
 # Editor/IDE
 .idea/
 .vscode/
+
+### Python (server and plugins)
+# Byte-compiled / optimized / DLL files
+server/**/__pycache__/
+server/**/*.py[cod]
+plugins/**/__pycache__/
+plugins/**/*.py[cod]
+
+# Virtual environments (Poetry in-project venv and local venvs)
+server/.venv/
+plugins/**/.venv/
+
+# Test and type-check caches
+server/**/.pytest_cache/
+server/**/.mypy_cache/
+server/**/.coverage*
+server/**/htmlcov/
+server/**/.tox/
+plugins/**/.pytest_cache/
+plugins/**/.mypy_cache/
+plugins/**/.coverage*
+plugins/**/htmlcov/
+plugins/**/.tox/
+
+# Build/distribution artifacts
+server/**/build/
+server/**/dist/
+server/**/*.egg-info/
+plugins/**/build/
+plugins/**/dist/
+plugins/**/*.egg-info/
