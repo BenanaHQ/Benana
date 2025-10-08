@@ -1,4 +1,4 @@
-### This project has been discontinued after the initial architecture phase. [8 Oct]
+### This project has been discontinued after the initial architecture phase. [8 Oct 2025]
 
 ### Benana - Free & Opensource AI ERP for Schools & Colleges
 
